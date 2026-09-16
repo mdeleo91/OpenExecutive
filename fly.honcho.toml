@@ -1,0 +1,92 @@
+# Fly.io config — self-hosted Honcho (optional peer-memory service).
+#
+# Deploy:  fly deploy --config fly.honcho.toml --remote-only
+# Build context is the repo root; docker/honcho/Dockerfile references
+# docker/honcho/config.toml and docker/honcho/embed_server.py from cwd.
+#
+# ────────────────────────────────────────────────────────────────────────────
+# ⚠️ THIS FILE IS A SCAFFOLD — two things must be confirmed before it deploys:
+#
+#   1. The `deriver` process command. docker/honcho/README.md names three roles
+#      (api / deriver / embed) but does not print the exact deriver invocation.
+#      Check Honcho v3.0.7's own container commands (the upstream Dockerfile /
+#      Procfile) and set `processes.deriver` below to match.
+#   2. Postgres. Honcho needs Postgres WITH pgvector. Create it and attach so
+#      DATABASE_URL is injected (see docs/fly-deployment.md, honcho section):
+#        fly postgres create --name openexecutive-honcho-db --region mia
+#        fly postgres attach openexecutive-honcho-db --app openexecutive-honcho
+#      Then, once, enable the extension:  CREATE EXTENSION IF NOT EXISTS vector;
+# ────────────────────────────────────────────────────────────────────────────
+
+app = "openexecutive-honcho"
+primary_region = "mia"
+
+[build]
+  dockerfile = "docker/honcho/Dockerfile"
+
+[deploy]
+  # Run DB provisioning + embedding-dimension reconciliation before new
+  # machines serve traffic, on every deploy (both scripts are idempotent).
+  # Confirm the script paths against Honcho v3.0.7 — README shows bare names,
+  # config.toml references scripts/configure_embeddings.py.
+  release_command = "sh -c 'python provision_db.py && python configure_embeddings.py --yes'"
+
+[env]
+  # Local fastembed sidecar (the `embed` process) over 6PN. bge-small-en-v1.5
+  # emits 384-dim vectors; Honcho defaults to 1536, so pin the dimension here.
+  EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL = "http://openexecutive-honcho.internal:8001/v1"
+  EMBEDDING_MODEL_CONFIG__OVERRIDES__API_KEY = "local-embed-no-auth"
+  EMBEDDING_VECTOR_DIMENSIONS = "384"
+  DERIVER_WORKERS = "2"
+  # Secrets (fly secrets set KEY=value --app openexecutive-honcho):
+  #   AUTH_JWT_SECRET     (every HONCHO_API_KEY derives from this — keep it safe)
+  #   LLM_OPENAI_API_KEY  (OpenRouter key; config.toml routes all LLM calls there)
+  #   DATABASE_URL is injected by `fly postgres attach`. Honcho may need the
+  #   postgres:// -> postgresql+psycopg:// scheme rewrite — see the runbook.
+
+# Three process groups from one image. api + embed take traffic; deriver is a
+# background worker with no service.
+[processes]
+  api = "fastapi run --host 0.0.0.0 src/main.py"
+  embed = "python embed_server.py"
+  deriver = "CONFIRM_DERIVER_COMMAND"   # <-- set from Honcho v3.0.7 upstream
+
+# Public HTTPS only for the api process. Keep it locked down — Open Executive
+# reaches it privately via HONCHO_BASE_URL; expose publicly only if you must.
+[[services]]
+  processes = ["api"]
+  internal_port = 8000
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [[services.http_checks]]
+    method = "GET"
+    path = "/health"
+    interval = "30s"
+    timeout = "10s"
+    grace_period = "2m"
+
+# The embeddings sidecar is reachable only on the private network, port 8001.
+[[services]]
+  processes = ["embed"]
+  internal_port = 8001
+  protocol = "tcp"
+  # No [[services.ports]] block => private-network only (6PN), no public edge.
+
+[[vm]]
+  processes = ["api"]
+  size = "shared-cpu-1x"
+  memory = "1gb"
+
+[[vm]]
+  processes = ["deriver"]
+  size = "shared-cpu-1x"
+  memory = "1gb"
+
+[[vm]]
+  processes = ["embed"]
+  size = "shared-cpu-1x"
+  memory = "1gb"   # loads bge-small-en-v1.5 into memory

@@ -1,0 +1,46 @@
+# Fly.io config — Open Executive API, QA environment.
+# Identical shape to fly.api.toml, separate app + volume so QA and prod never
+# share state. Deploy: fly deploy --config fly.api.qa.toml --remote-only
+#
+# ⚠️ SINGLE INSTANCE ONLY — same scheduler constraint as prod. Do not scale to 2.
+
+app = "openexecutive-api-qa"
+primary_region = "mia"
+
+[build]
+  dockerfile = "docker/Dockerfile"
+
+[deploy]
+  strategy = "immediate"
+
+[env]
+  OE_PUBLIC_DEPLOYMENT = "1"
+  VECTOR_STORE_PATH = "/data/chroma_db"
+  EPISODIC_DB_PATH = "/data/episodic_memory.db"
+  COMPANY_PROFILE_PATH = "/data/company/profile.yaml"
+  # Secrets (set with --app openexecutive-api-qa):
+  #   ANTHROPIC_API_KEY, BACKEND_SHARED_SECRET, BACKEND_ALLOWED_ORIGINS
+  #   BACKEND_ALLOWED_ORIGINS -> https://openexecutive-ui-qa.fly.dev
+
+# fly volumes create executive_data --app openexecutive-api-qa --region mia --size 1
+[mounts]
+  source = "executive_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    interval = "30s"
+    timeout = "10s"
+    grace_period = "5m"
+
+[[vm]]
+  size = "shared-cpu-1x"   # smaller for QA; raise if it OOMs on model load
+  memory = "2gb"
