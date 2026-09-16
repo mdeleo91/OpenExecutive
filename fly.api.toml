@@ -1,13 +1,7 @@
 # Fly.io config — Open Executive API (FastAPI backend), DEV/production app.
 #
-# Deploy:  fly deploy --config fly.api.toml --remote-only
-# Build context is the repo root (the directory this file lives in), which is
-# what docker/Dockerfile expects.
-#
 # ⚠️ SINGLE INSTANCE ONLY. The API's scheduler claims rows with
-# `UPDATE ... RETURNING`, which double-fires if two API machines run. This
-# config pins the app to one machine and uses a replace-in-place rollout.
-# Do NOT `fly scale count 2` this app.
+# `UPDATE ... RETURNING`; a second machine double-fires. Do NOT scale to 2.
 
 app = "openexecutive-api"
 primary_region = "dfw"  # Dallas (mia/Miami is deprecated on Fly)
@@ -18,13 +12,20 @@ primary_region = "dfw"  # Dallas (mia/Miami is deprecated on Fly)
 [deploy]
   strategy = "immediate"
 
+# Bind uvicorn to :: (IPv6, dual-stack — also accepts IPv4) instead of the
+# image's default 0.0.0.0. Fly's private 6PN network between apps is IPv6-only,
+# so the UI reaches the API at openexecutive-api.internal:8000 only if the API
+# listens on IPv6. 0.0.0.0 is IPv4-only and gives ECONNREFUSED over 6PN.
+[processes]
+  app = "uvicorn openexecutive.api.main:app --host :: --port 8000"
+
 [env]
   OE_PUBLIC_DEPLOYMENT = "1"
   VECTOR_STORE_PATH = "/data/chroma_db"
   EPISODIC_DB_PATH = "/data/episodic_memory.db"
   COMPANY_PROFILE_PATH = "/data/company/profile.yaml"
-  # Secrets set separately (NOT in this file):
-  #   ANTHROPIC_API_KEY, BACKEND_SHARED_SECRET, BACKEND_ALLOWED_ORIGINS
+  # Secrets set separately: ANTHROPIC_API_KEY, BACKEND_SHARED_SECRET,
+  # BACKEND_ALLOWED_ORIGINS, EXEC_EMAIL_ADDRESS
 
 [mounts]
   source = "executive_data"
