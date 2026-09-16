@@ -2,43 +2,30 @@
 #
 # Deploy:  fly deploy --config fly.api.toml --remote-only
 # Build context is the repo root (the directory this file lives in), which is
-# what docker/Dockerfile expects — it COPYs packages/core, fixtures/, and
-# docker/workspace-mcp-launch.sh from the repo root.
+# what docker/Dockerfile expects.
 #
 # ⚠️ SINGLE INSTANCE ONLY. The API's scheduler claims rows with
-# `UPDATE ... RETURNING`, which is not safe across processes: a second replica
-# double-fires every scheduled action (see docs/deployment.md). This config
-# pins the app to exactly one machine and uses a replace-in-place ("immediate")
-# rollout so two never run at once. Do NOT `fly scale count 2` this app.
+# `UPDATE ... RETURNING`, which double-fires if two API machines run. This
+# config pins the app to one machine and uses a replace-in-place rollout.
+# Do NOT `fly scale count 2` this app.
 
 app = "openexecutive-api"
-primary_region = "mia"  # Miami — closest region; change to taste (iad, etc.)
+primary_region = "dfw"  # Dallas (mia/Miami is deprecated on Fly)
 
 [build]
   dockerfile = "docker/Dockerfile"
 
 [deploy]
-  # Replace the single machine in place instead of a rolling deploy that would
-  # briefly run two instances (unsafe for the scheduler, and impossible anyway
-  # since the /data volume can only attach to one machine at a time).
   strategy = "immediate"
 
 [env]
-  # Public deployment hardening — REQUIRED on any internet-reachable instance.
   OE_PUBLIC_DEPLOYMENT = "1"
-  # Persistent-state paths, mirrored onto the /data volume mounted below.
   VECTOR_STORE_PATH = "/data/chroma_db"
   EPISODIC_DB_PATH = "/data/episodic_memory.db"
   COMPANY_PROFILE_PATH = "/data/company/profile.yaml"
   # Secrets set separately (NOT in this file):
   #   ANTHROPIC_API_KEY, BACKEND_SHARED_SECRET, BACKEND_ALLOWED_ORIGINS
-  # Set them with: fly secrets set KEY=value --app openexecutive-api
-  # BACKEND_ALLOWED_ORIGINS should be the UI's public origin, e.g.
-  #   https://openexecutive-ui.fly.dev
 
-# Persistent volume for ChromaDB, the episodic SQLite DB, company profile/docs,
-# and any Google Workspace OAuth token. Create it once before first deploy:
-#   fly volumes create executive_data --app openexecutive-api --region mia --size 3
 [mounts]
   source = "executive_data"
   destination = "/data"
@@ -46,21 +33,17 @@ primary_region = "mia"  # Miami — closest region; change to taste (iad, etc.)
 [http_service]
   internal_port = 8000
   force_https = true
-  # Never stop the single machine: it runs the scheduler, pollers, and any
-  # chat bots in-process. Keep exactly one running at all times.
   auto_stop_machines = false
   auto_start_machines = false
   min_machines_running = 1
 
   [[http_service.checks]]
     method = "GET"
-    path = "/health"          # exempt from the shared-secret gate by design
+    path = "/health"
     interval = "30s"
     timeout = "10s"
-    # First boot rebuilds the ChromaDB knowledge index and warms models; give it
-    # room so the machine isn't killed mid-startup (see docs/deployment.md).
     grace_period = "5m"
 
 [[vm]]
   size = "shared-cpu-2x"
-  memory = "2gb"   # embedding model + Chroma index + MCP subprocess; bump if OOM
+  memory = "2gb"
