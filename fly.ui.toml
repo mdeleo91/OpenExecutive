@@ -24,13 +24,10 @@ primary_region = "dfw"  # Dallas (mia/Miami is deprecated on Fly)
   auto_stop_machines = true
   auto_start_machines = true
   min_machines_running = 1
-
-  [[http_service.checks]]
-    method = "GET"
-    path = "/"
-    interval = "30s"
-    timeout = "5s"
-    grace_period = "30s"
+  # No HTTP health check: the UI gates "/" behind sign-in and 302-redirects,
+  # which Fly would read as unhealthy. Fly's connect check (machine started +
+  # accepting TCP on 3000) is enough here. Add a check on a public 200 route
+  # later if desired.
 
 [[vm]]
   size = "shared-cpu-1x"
