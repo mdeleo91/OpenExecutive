@@ -8,6 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Chat history in Postgres, with a history UI that works on a phone.**
+  Conversations and messages move to Postgres when `DATABASE_URL` is set (on
+  Fly.io, the Managed Postgres URL injected by `fly mpg attach`); with the
+  variable unset they stay in the SQLite `sessions` / `chat_messages` tables,
+  so local development and the test suite need no setup. One facade —
+  `memory/session_store.py` — dispatches per call, so every writer (the `/chat`
+  SSE route, the `/sessions` routes, and the Discord / Telegram / Slack / email
+  / Google Chat bots) is unchanged. Schema lives in forward-only SQL files
+  under `memory/migrations/`, applied under a Postgres advisory lock and
+  recorded in `schema_migrations`: at API boot, from `openexecutive migrate
+  [--check]`, and from the `release_command` in `fly.api.toml` (a no-op until
+  the database is attached). New endpoints: `POST /sessions` (create),
+  `PATCH /sessions/{id}` (rename); the sidebar gains loading and empty states,
+  inline rename, and touch-visible row actions.
+
+  Design notes: `conversations.id` stays TEXT because the channel bots key
+  their threads by external ids (`telegram:<chat_id>`, `discord:thread:<id>`),
+  and the uniqueness key is `(client_slug, id)` — client slots and demo
+  fixtures swap the SQLite *file*, which cannot swap Postgres rows, so every
+  operation (not just the sidebar list) carries the scope predicate and the
+  in-process Session cache is keyed by scope too. A session id is not a
+  capability: the ownership gate runs on every by-id route **and** on
+  `POST /chat` with a caller-supplied `session_id`, returning 404 rather than
+  403, and a conversation's cached history is dropped as soon as its row is
+  gone. The first-turn auto-title only replaces the `New chat` placeholder, so
+  a name set via `POST /sessions` or a rename survives.
+
+  Mobile: `viewport-fit=cover` plus `interactive-widget=resizes-content` and a
+  `100dvh` body, so the sticky composer stays above the on-screen keyboard;
+  16px composer text (iOS zooms anything smaller on focus); 44px touch targets
+  on coarse pointers; safe-area insets for notched devices; no horizontal
+  scroll at 360–414px (long URLs, code blocks and GFM tables scroll inside the
+  message instead); a scroll-to-latest button that does not fight a user
+  reading back; and a drawer where the conversation list is visible on open
+  rather than below a screenful of navigation.
 - **Conversational onboarding.** `/onboard` now opens with "tell me about your
   company" instead of a 12-step form. The user writes a paragraph (and can
   attach a deck, one-pager or brief), the new `onboarding_interviewer` agent

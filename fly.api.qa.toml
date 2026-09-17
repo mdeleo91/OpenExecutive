@@ -12,6 +12,10 @@ primary_region = "mia"
 
 [deploy]
   strategy = "immediate"
+  # Apply chat-history migrations against the attached Managed Postgres before
+  # the new machine serves traffic. Exits 0 (no-op) until DATABASE_URL exists,
+  # so this is safe to deploy before `fly mpg attach` has run.
+  release_command = "python -m openexecutive.memory.migrate"
 
 [env]
   OE_PUBLIC_DEPLOYMENT = "1"

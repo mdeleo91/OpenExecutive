@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class PageFormField(BaseModel):
@@ -154,6 +154,43 @@ class SessionSummary(BaseModel):
     created_at: str
     updated_at: str
     message_count: int = 0
+
+
+# Max length for a user-supplied conversation title (create / rename). Matches
+# the sidebar's truncation budget; the generated first-turn title is capped
+# at 60 by the chat route.
+SESSION_TITLE_MAX_LEN = 200
+
+
+def _normalise_title(v: str) -> str:
+    """Collapse all whitespace (incl. newlines / control whitespace) to single
+    spaces — the same shape the sidebar renders and the LLM prompt context
+    consumes."""
+    return " ".join(v.split())
+
+
+class SessionCreateRequest(BaseModel):
+    # Optional: omitted or blank → "New chat" until the first turn names it.
+    title: str | None = Field(None, max_length=SESSION_TITLE_MAX_LEN)
+
+    @field_validator("title")
+    @classmethod
+    def _normalise(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return _normalise_title(v) or None
+
+
+class SessionRenameRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=SESSION_TITLE_MAX_LEN)
+
+    @field_validator("title")
+    @classmethod
+    def _strip_and_require_text(cls, v: str) -> str:
+        cleaned = _normalise_title(v)
+        if not cleaned:
+            raise ValueError("title must contain visible text")
+        return cleaned
 
 
 class TargetCustomerData(BaseModel):

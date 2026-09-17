@@ -42,6 +42,23 @@ jobs:
   python-test:
     name: Python tests
     runs-on: ubuntu-latest
+    # Scratch Postgres for the chat-history backend tests
+    # (tests/unit/test_session_store_postgres.py). The suite skips them when
+    # TEST_DATABASE_URL is unset, so local runs without Postgres still pass.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: openexecutive_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v7
 
@@ -58,6 +75,8 @@ jobs:
 
       - name: Run unit tests
         run: cd packages/core && uv run pytest tests/unit/ -v --tb=short
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/openexecutive_test
 
   ui-typecheck:
     name: UI type check

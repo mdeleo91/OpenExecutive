@@ -71,6 +71,61 @@ and the SQLite database is created on demand. The company profile stays empty
 until you run the onboarding wizard against the deployed URL — the wizard failing
 with "no company profile" on a fresh volume is expected, not a fault.
 
+### Chat history (Postgres)
+
+Conversations and their messages are the one piece of state that does **not**
+have to live on the volume. When `DATABASE_URL` is set the API stores them in
+Postgres (`conversations` + `messages`, see
+`packages/core/openexecutive/memory/migrations/`); when it is unset they stay in
+the `sessions` / `chat_messages` tables of `/data/episodic_memory.db`. The two
+stores are never merged — set the variable before the first real conversation
+on an instance, or accept that older SQLite chats stop showing in the sidebar.
+
+**Fly.io (Managed Postgres).** Create the cluster in the API app's
+`primary_region` so every history load stays in-region, then attach it to the
+API app. Attaching writes `DATABASE_URL` as a secret on that app; the UI app
+needs nothing (it proxies through the API, and secrets never reach the browser
+bundle).
+
+```bash
+fly mpg create --name openexecutive-db --region dfw --org <your-org>
+fly mpg attach openexecutive-db --app openexecutive-api
+fly deploy --config fly.api.toml --remote-only
+```
+
+If Managed Postgres is not available to your organisation, the legacy
+`fly postgres create --name openexecutive-db --region dfw` /
+`fly postgres attach openexecutive-db --app openexecutive-api` pair works the
+same way. QA uses its own cluster attached to `openexecutive-api-qa` (region
+`mia`).
+
+**Migrations** run in two places, both idempotent and serialised by a Postgres
+advisory lock: the `release_command` in `fly.api.toml` (before the new machine
+takes traffic; a no-op that exits 0 until the database is attached) and the API
+lifespan at boot. A failing migration fails the deploy rather than booting a
+half-migrated API. Apply or inspect by hand with `openexecutive migrate` /
+`openexecutive migrate --check` (run `fly ssh console -a openexecutive-api` first,
+or locally through `fly mpg proxy`). Never hand-edit the live schema — add a
+numbered `.sql` file.
+
+**Connections.** The API is a single instance; it opens one small pool
+(`DATABASE_POOL_MAX_SIZE`, default 4) and reuses it for the life of the process,
+so it never approaches a Managed Postgres connection limit. Do not scale the API
+horizontally for this reason either (the scheduler constraint above already
+forbids it).
+
+**Backups.** Managed Postgres takes its own snapshots (`fly mpg` docs); the
+SQLite backup note under *Operations* no longer covers chat history once
+`DATABASE_URL` is set. Rolling the image back does not undo a migration; the
+first migration is purely additive, so an older build simply ignores the tables.
+
+**Multi-client mode.** Client slots and demo fixtures swap the SQLite file, but
+Postgres rows do not travel with them. Each conversation is keyed by the
+active client slug (or `fixture:<name>`) plus its id, every read and write is
+scoped to the active client (person ids and channel thread ids repeat across
+slots), deleting a slot purges its conversations, and a fixture unload / full
+reset purges the demo's and the default scope's conversations respectively.
+
 ---
 
 ## Required configuration
@@ -210,6 +265,8 @@ the host — a plain file copy of a live SQLite database can be torn.
 | Browser console shows CORS errors | UI origin missing from `BACKEND_ALLOWED_ORIGINS` | Add the exact scheme + host |
 | Scheduled actions firing twice | More than one API replica | Scale the API to exactly 1 (see the warning at the top) |
 | Onboarding wizard says "no company profile" | Empty volume on first boot | Expected — complete the wizard; output lands at `/data/company/profile.yaml` |
+| API fails at boot with a `psycopg` / `OperationalError` | `DATABASE_URL` is set but the cluster is unreachable, or a migration failed | Check `fly mpg status`, the URL secret, and the release-command logs; the API deliberately refuses to fall back to SQLite when the variable is set |
+| Recent chats vanished after enabling Postgres | History moved stores; the SQLite rows are still on the volume but no longer listed | Expected on the switch-over — see *Chat history (Postgres)* above |
 
 ---
 

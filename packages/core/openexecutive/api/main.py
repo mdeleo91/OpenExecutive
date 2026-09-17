@@ -241,6 +241,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     initialize_db()
     initialize_alerts_db()
 
+    # Chat history: when DATABASE_URL is set, conversations live in Postgres
+    # (Fly Managed Postgres in production). Apply pending migrations before
+    # serving so the first /chat never races the schema. Fail fast on error:
+    # an operator who set DATABASE_URL expects Postgres, and silently falling
+    # back to SQLite would split history across two stores.
+    from openexecutive.memory import postgres as chat_postgres
+    if chat_postgres.is_configured():
+        from openexecutive.memory.migrate import run_migrations
+
+        applied = await asyncio.to_thread(run_migrations)
+        logging.getLogger("openexecutive").info(
+            "chat history: Postgres ready (%s)",
+            "applied " + ", ".join(applied) if applied else "schema up to date",
+        )
+    else:
+        logging.getLogger("openexecutive").info(
+            "chat history: DATABASE_URL unset — using SQLite tables in the episodic DB"
+        )
+
     # User-generated company fixtures (DB-backed; persists on the data volume).
     from openexecutive.fixtures.store import initialize_db as initialize_fixtures_db
     initialize_fixtures_db()
@@ -510,6 +529,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from openexecutive.orchestrator.mcp_gateway import set_active_gateway
         set_active_gateway(None)
         await app.state.mcp_gateway.close()
+
+    chat_postgres.close_pool()
 
     # Cleanup if needed (ChromaDB handles persistence)
 

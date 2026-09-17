@@ -223,6 +223,40 @@ Set `ANTHROPIC_API_KEY`, `BACKEND_SHARED_SECRET`, `BACKEND_ALLOWED_ORIGINS` and
 [docs/deployment.md](docs/deployment.md) for the full guide — persistent state,
 health-check timing, resource sizing, operations, and common failure modes.
 
+### Chat history database (Postgres)
+
+Conversations and messages are stored in Postgres when `DATABASE_URL` is set;
+without it they live in the SQLite episodic database (fine for a laptop, and
+what the test suite uses). On Fly.io, provision a Managed Postgres cluster in
+the API app's region and attach it — attaching sets `DATABASE_URL` as a secret
+on the API app only (the UI never sees it; the browser only talks to the UI's
+server-side proxy):
+
+```bash
+fly mpg create --name openexecutive-db --region dfw --org <your-org>
+fly mpg attach openexecutive-db --app openexecutive-api
+fly deploy --config fly.api.toml --remote-only
+```
+
+Migrations are plain SQL files under
+`packages/core/openexecutive/memory/migrations/`, tracked in a
+`schema_migrations` table. They run automatically at API start and from the
+`release_command` in `fly.api.toml` (a no-op until the database is attached),
+or by hand:
+
+```bash
+cd packages/core
+uv run openexecutive migrate            # apply pending migrations
+uv run openexecutive migrate --check    # exit 1 if anything is pending
+```
+
+Local development against the Fly cluster: `fly mpg proxy openexecutive-db`
+(or `fly proxy 5432 -a <cluster-app>`), then set
+`DATABASE_URL=postgresql://<user>:<password>@localhost:5432/<db>` in `.env`.
+Any local Postgres 14+ works the same way. See
+[docs/deployment.md](docs/deployment.md#chat-history-postgres) for backups and
+operations.
+
 ### Access control
 
 The deployed UI is gated behind Google sign-in with an email allow-list, and the public API is protected by a shared-secret header between the UI proxy and the FastAPI backend. See [docs/auth.md](docs/auth.md) for the full setup (Google Cloud Console steps, required environment variables, adding/removing users, rotating secrets, and a debugging table).
@@ -241,6 +275,8 @@ the app refuses to start.
 | `DEEP_REASONING_MODEL` | No | `claude-opus-5` | CSO, CFO, GC, Board |
 | `VECTOR_STORE_PATH` | No | `./chroma_db` | ChromaDB directory |
 | `EPISODIC_DB_PATH` | No | `./episodic_memory.db` | SQLite for episodic memory |
+| `DATABASE_URL` | No | — | Postgres for chat history (conversations + messages). Unset → chat history stays in the SQLite episodic DB. On Fly.io, injected by `fly mpg attach`. |
+| `DATABASE_POOL_MAX_SIZE` | No | `4` | Postgres connection-pool ceiling for the single API instance |
 | `COMPANY_PROFILE_PATH` | No | `./company/profile.yaml` | Company profile |
 | `ENABLE_CACHING` | No | `true` | Anthropic prompt caching |
 | `ROUTING_MODEL` | No | `claude-haiku-4-5` | Model for intent routing |

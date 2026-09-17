@@ -719,6 +719,36 @@ export async function deleteSession(sessionId: string): Promise<void> {
   if (!res.ok) throw new Error("Failed to delete session");
 }
 
+// Create an empty conversation up front. The chat route also creates the
+// row lazily on the first turn, so this is optional — useful when the UI
+// wants a stable id (and a sidebar entry) before the first message lands.
+export async function createSession(title?: string): Promise<SessionSummary> {
+  const res = await fetch(`${API_BASE}/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(title ? { title } : {}),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as { detail?: string }).detail ?? "Failed to create session");
+  }
+  return res.json();
+}
+
+export async function renameSession(sessionId: string, title: string): Promise<SessionSummary> {
+  const res = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const detail = (err as { detail?: unknown }).detail;
+    throw new Error(typeof detail === "string" ? detail : "Failed to rename session");
+  }
+  return res.json();
+}
+
 export interface SuggestedPromptsResponse {
   prompts: string[];
   subtitle: string;

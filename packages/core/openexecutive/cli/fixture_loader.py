@@ -572,8 +572,16 @@ async def unload_fixture(settings: Any) -> dict[str, Any]:
             summary["client_saved"] = summary_client
 
         # Clear the active-fixture sentinel — current state is the user's own.
+        # Read the name first: the demo's Postgres-backed chats are scoped to
+        # `fixture:<name>` and are dropped with it (the SQLite chat tables are
+        # restored from the backup above, so this only matters on Postgres).
+        unloaded_fixture = get_fixture_status(settings).get("active_fixture")
         sentinel = _fixture_active_sentinel(settings)
         sentinel.unlink(missing_ok=True)
+        if unloaded_fixture:
+            from openexecutive.memory.session_store import fixture_scope, purge_scope
+
+            purge_scope(fixture_scope(unloaded_fixture))
 
         # Honcho cleanup: delete the per-fixture workspace and clear the
         # override so the operator's env-default workspace takes over
@@ -733,6 +741,23 @@ async def reset_all_state(
                 *PER_CLIENT_CACHE_TABLES,
             ),
         )
+        # Postgres-backed chat history (DATABASE_URL): the SQLite wipe above
+        # does not reach it, so drop the default scope and any active demo's
+        # scope explicitly. No-op on SQLite.
+        from openexecutive.memory.session_store import fixture_scope, purge_scope
+
+        purge_scope(None)
+        _active_fixture = get_fixture_status(settings).get("active_fixture")
+        if _active_fixture:
+            purge_scope(fixture_scope(_active_fixture))
+        # A factory reset with a client slot active must clear that client's
+        # conversations too: the SQLite pass above wipes its live tables, and
+        # on Postgres those rows live under the slug's own scope.
+        from openexecutive.clients.slots import get_active_client
+
+        _active_client = get_active_client(settings)
+        if _active_client:
+            purge_scope(_active_client)
 
         # 4. People (child tables first to satisfy FK ordering)
         from openexecutive.people import store as people_store

@@ -15,6 +15,11 @@ os.environ.setdefault("EXEC_EMAIL_ADDRESS", "ceo.test@example.com")
 # (see CLAUDE.md → Testing). Clear it so the suite matches CI either way.
 os.environ.pop("OE_PUBLIC_DEPLOYMENT", None)
 
+# Chat history dispatches to Postgres whenever DATABASE_URL is set. The suite
+# exercises the SQLite path by default (the Postgres tests opt in with their
+# own TEST_DATABASE_URL), so a developer's shell value must not leak in.
+os.environ.pop("DATABASE_URL", None)
+
 
 @pytest.fixture(autouse=True)
 def reset_active_gateway():

@@ -1,4 +1,5 @@
 import type { SessionSummary } from "@/lib/api";
+import { parseApiTimestamp } from "@/lib/relativeTime";
 
 export type GroupKey = "today" | "yesterday" | "prev7" | "prev30" | "older";
 
@@ -47,7 +48,7 @@ export function groupSessionsByDate(
   };
 
   for (const s of sessions) {
-    const t = new Date(s.updated_at).getTime();
+    const t = parseApiTimestamp(s.updated_at);
     let key: GroupKey;
     if (Number.isNaN(t)) {
       key = "older";

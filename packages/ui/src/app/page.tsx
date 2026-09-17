@@ -12,7 +12,7 @@ import SidebarNav from "@/components/SidebarNav";
 import { MobileBottomNav } from "@/components/shell/AppShell";
 import { buildPrimaryNav, GUIDE_NAV_ITEM, SETTINGS_NAV_ITEM } from "@/components/shell/navConfig";
 import UserBadge from "@/components/UserBadge";
-import { ChatMessage, DebugEvent, ReviewStats, SessionSummary, deleteSession, getReviewStats, getSessionMessages, listSessions } from "@/lib/api";
+import { ChatMessage, DebugEvent, ReviewStats, SessionSummary, deleteSession, getReviewStats, getSessionMessages, listSessions, renameSession } from "@/lib/api";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
@@ -32,6 +32,9 @@ export default function HomePage() {
   const activeTurnIdRef = useRef<string | null>(null);
   const [isTurnInFlight, setIsTurnInFlight] = useState(false);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  // True until the first /sessions fetch settles (success or failure) so the
+  // sidebar shows a skeleton rather than "No conversations yet" on load.
+  const [sessionsLoading, setSessionsLoading] = useState(true);
   const [activeSessionId, setActiveSessionId] = useState<string | undefined>();
   const [activeMessages, setActiveMessages] = useState<ChatMessage[]>([]);
   const [reviewStats, setReviewStats] = useState<ReviewStats | null>(null);
@@ -55,7 +58,8 @@ export default function HomePage() {
   const refreshSessions = useCallback(() => {
     listSessions()
       .then(setSessions)
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setSessionsLoading(false));
   }, []);
 
   useEffect(() => {
@@ -137,6 +141,27 @@ export default function HomePage() {
     [refreshSessions]
   );
 
+  // Rename: optimistic sidebar update, then reconcile with the server's
+  // normalised title (whitespace-collapsed). On failure the list refreshes
+  // so the old title comes back and the editor surfaces the error.
+  const handleRenameSession = useCallback(
+    async (sessionId: string, title: string) => {
+      setSessions((prev) =>
+        prev.map((s) => (s.session_id === sessionId ? { ...s, title } : s)),
+      );
+      try {
+        const updated = await renameSession(sessionId, title);
+        setSessions((prev) =>
+          prev.map((s) => (s.session_id === sessionId ? { ...s, ...updated } : s)),
+        );
+      } catch (err) {
+        refreshSessions();
+        throw err;
+      }
+    },
+    [refreshSessions],
+  );
+
   const handleTurnComplete = useCallback((sessionId: string) => {
     setActiveSessionId(sessionId);
     setIsTurnInFlight(false);
@@ -198,7 +223,7 @@ export default function HomePage() {
       {/* Mobile backdrop */}
       {mobileNavOpen && (
         <div
-          className="fixed top-8 bottom-0 left-0 right-0 bg-black/50 z-30 md:hidden"
+          className="fixed inset-0 bg-black/50 z-30 md:hidden"
           onClick={() => setMobileNavOpen(false)}
           aria-hidden="true"
         />
@@ -207,8 +232,9 @@ export default function HomePage() {
       {/* Sidebar — slides in on mobile, static on md+ */}
       <aside
         className={`
-          fixed top-8 bottom-0 left-0 z-40 w-64 md:w-56 md:top-0 flex-shrink-0
+          fixed inset-y-0 left-0 z-40 w-[min(18rem,85vw)] md:w-56 flex-shrink-0
           border-r border-line flex flex-col bg-surface-elevated
+          pb-[env(safe-area-inset-bottom)] md:pb-0
           transform transition-transform duration-200
           md:relative md:translate-x-0 md:transition-none
           ${mobileNavOpen ? "translate-x-0" : "-translate-x-full"}
@@ -243,9 +269,17 @@ export default function HomePage() {
           </button>
         </div>
 
+        {/* Below md the drawer is one phone-height column and the nav alone is
+            taller than it, so Recent used to sit entirely below the fold —
+            the user had to scroll past every nav row to reach any chat. On
+            mobile the nav is therefore capped at part of the drawer and
+            scrolls internally, leaving the rest to Recent (which scrolls too):
+            both are visible on open. At md+ this wrapper dissolves
+            (`md:contents`) and the desktop layout is exactly as before. */}
+        <div className="flex-1 min-h-0 flex flex-col md:contents">
         {/* Nav region — own scroll; compresses/scrolls internally only when the
             sidebar is too short, so Recent below always keeps a usable height */}
-        <div className="min-h-0 overflow-y-auto pt-3">
+        <div className="max-h-[45%] overflow-y-auto overscroll-y-contain min-h-0 md:max-h-none md:flex-shrink md:overflow-y-auto pt-3">
         <SidebarNav
           sections={navSections}
           briefingActive={mode === "briefing"}
@@ -257,16 +291,26 @@ export default function HomePage() {
 
         </div>
 
-        {/* Recent conversations — date-grouped, searchable, own scroll region */}
-        <RecentSessions
-          sessions={sessions}
-          activeSessionId={activeSessionId}
-          onSelect={handleSelectSession}
-          onDelete={(id) => void handleDeleteSession(id)}
-        />
+        {/* Recent conversations — date-grouped, searchable, own scroll region.
+            The inner wrapper gives it the drawer's remaining height below md
+            and dissolves at md+, leaving the original content-sized item. */}
+        <div className="flex-1 min-h-0 flex flex-col md:contents">
+          <RecentSessions
+            sessions={sessions}
+            activeSessionId={activeSessionId}
+            isLoading={sessionsLoading}
+            onSelect={handleSelectSession}
+            onDelete={(id) => void handleDeleteSession(id)}
+            onRename={handleRenameSession}
+          />
+        </div>
+        </div>
 
-        {/* Spacer — pins the footer to the bottom now that Recent is content-sized */}
-        <div className="flex-1 min-h-0" />
+        {/* Spacer — pins the footer to the bottom at md+, where Recent is
+            content-sized. Hidden below md: there the wrapper above is the
+            flex-1 scroll column, and a second flex-1 sibling would split the
+            drawer height with it and leave half of it blank. */}
+        <div className="hidden md:block md:flex-1 md:min-h-0" />
 
         {/* Footer — User Guide (always-visible help) and Settings (the hub
             for admin/power tools), kept out of the primary groups above so

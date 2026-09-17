@@ -814,6 +814,69 @@ memory:
     - initiatives
     - advice_given
     - scheduled_actions
+  chat_history: |
+    Conversations + messages have a pluggable backend behind one facade,
+    `memory/session_store.py` (create_session / save_message / load_messages /
+    list_sessions / update_session_title / delete_session /
+    get_session_metadata / purge_scope). Every caller — the /chat SSE route,
+    /sessions CRUD, Discord/Telegram/Slack/email/Google Chat bots, inbound
+    hydration — goes through it and never sees which backend is live.
+      - DATABASE_URL unset (local dev, tests): SQLite tables `sessions` +
+        `chat_messages` in the episodic DB, created by episodic.initialize_db.
+      - DATABASE_URL set (Fly Managed Postgres in production, injected by
+        `fly mpg attach`): Postgres tables `conversations` + `messages`
+        (`memory/session_store_pg.py`). One process-wide psycopg3 sync pool
+        (`memory/postgres.py`, min 1 / max DATABASE_POOL_MAX_SIZE=4, opened
+        lazily, closed in the lifespan shutdown). Timezone pinned to UTC on
+        the pool so the naive `Session.created_at` is never reinterpreted.
+    Schema is owned by forward-only SQL files in `memory/migrations/`
+    (`0001_chat_history.sql`), applied by `memory/migrate.py` under a
+    session-level pg_advisory_lock and recorded in `schema_migrations`;
+    each file is its own transaction. Runs from the API lifespan (fail-fast:
+    a set DATABASE_URL that cannot migrate aborts boot rather than silently
+    splitting history into SQLite), from `openexecutive migrate [--check]`,
+    and from the Fly `release_command` (`python -m openexecutive.memory.migrate`,
+    exit 0 no-op until the DB is attached).
+    Invariants: `conversations.id` is TEXT (channel ids like
+    `telegram:<chat>` share the store, so no UUID column) and the uniqueness
+    key is `(client_slug, id)` over a surrogate `pk` that `messages` reference
+    (`conversation_pk`, cascade on delete); history loads read
+    `(conversation_pk, created_at, id)` via a matching index;
+    `owner_person_id` mirrors `caller_person_id` (NULL-owner rows are never
+    listed, and by id they are the principal's alone — `chat.may_access_session`
+    — because such a pre-roster row can hold the principal's own history and
+    the owner late-bind would otherwise hand ownership, and with it rename and
+    delete, to whoever continued it first); `client_slug` (`''` = default) scopes EVERY operation — list, by-id
+    read, write, delete — to the active client slot or `fixture:<name>`
+    (resolved per call by `session_store.current_client_scope`, which fails
+    closed) because slot switches swap the SQLite file but cannot swap
+    Postgres rows, and person ids / channel thread ids repeat across slots;
+    `purge_scope` is called from client-slot delete, fixture unload
+    (`fixture:<name>`) and full reset (default scope + active fixture).
+    Access gate: `chat._assert_session_access` runs on every `/sessions`
+    by-id route AND on `POST /chat` when a `session_id` is supplied, before
+    anything is loaded into the in-process Session cache or the model
+    context. That cache (`chat._sessions`) is keyed by
+    `(client scope, session id)` for the same reason the store is scoped:
+    otherwise a slot switch would serve the previous company's live
+    conversation history from memory, behind the store's checks. It is also
+    dropped for an id whose row is gone (`chat.forget_cached_session`, called
+    from the gate and from DELETE /sessions) — the gate lets an unknown id
+    through so a fresh conversation can start under it, so without that a
+    deleted or purged conversation's history would still be served from
+    memory to whoever next presents the id.
+    Known race (both backends): the scope is resolved per store call, so a
+    read-then-write route (rename, delete) or a chat turn that straddles an
+    operator's client-slot switch can resolve two different scopes. A
+    colliding id across slots (channel thread ids collide by construction) is
+    then needed to act on the wrong company's row; the chat-turn variant just
+    drops the write with an error log. Fixing it means resolving the scope
+    once per request and threading it through the store calls.
+    Titles: `create_session` returns the row's effective title and only
+    replaces the stored one while it is still the `New chat` placeholder, so
+    the first-turn auto-title (Haiku) cannot overwrite a name the user chose
+    via `POST /sessions` or a rename; the chat route only renames when the
+    stored title is still the placeholder it supplied.
   formatter: openexecutive.memory.episodic.format_for_prompt — produces a compact prompt block of recent decisions/initiatives.
   session_scoping: |
     Decisions and advice rows carry a session_id so per-thread continuity
@@ -1457,7 +1520,8 @@ chat:
     `done` event arrives. Chips are persisted alongside the assistant
     message: the `/chat` SSE loop collects the `action_taken` items as
     they stream and stores them as JSON in the nullable
-    `chat_messages.action_chips` column; `session_store.load_messages`
+    `chat_messages.action_chips` column (JSONB `messages.action_chips` on the
+    Postgres backend); `session_store.load_messages`
     re-attaches them as `actions`, so reopening a saved session restores
     the pills (legacy rows that predate the column stay chip-less). The
     audit log remains the independent durable record (every

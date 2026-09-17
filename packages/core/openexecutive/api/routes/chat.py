@@ -29,7 +29,14 @@ _MAX_FILES_PER_TURN = 5
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-_sessions: dict[str, Any] = {}
+# Live Session objects (in-context conversation history), keyed by
+# (client scope, session id). The scope is part of the key because client
+# slots and demo fixtures swap the whole company: without it, switching to
+# another client and reopening the same id — a channel thread id such as
+# `telegram:<chat>` is identical across clients — would hand back the
+# previous company's history straight from this cache, behind the store's
+# scope checks. A scope change simply misses.
+_sessions: dict[tuple[str | None, str], Any] = {}
 
 # Most-recent completed turn's debug events, for the /debug/last-turn endpoint.
 # Single-process only; replaced wholesale at the end of every turn.
@@ -40,24 +47,27 @@ _TITLE_MAX_LEN = 60
 
 
 def _get_or_create_session(session_id: str | None, request: Request) -> Any:
-    from openexecutive.memory.session_store import load_messages
+    from openexecutive.memory.session_store import current_client_scope, load_messages
     from openexecutive.onboarding.profile_builder import load_or_create_profile
     from openexecutive.orchestrator.session import Session
 
-    if session_id and session_id in _sessions:
-        return _sessions[session_id]
+    scope = current_client_scope()
+    if session_id and (scope, session_id) in _sessions:
+        return _sessions[(scope, session_id)]
 
     new_id = session_id or str(uuid.uuid4())
     profile = load_or_create_profile()
     session = Session(session_id=new_id, company_profile=profile if not profile.is_empty() else None)
 
     if session_id:
-        # Server may have restarted — reload history from DB so conversation continues.
+        # Server may have restarted — reload history from DB so conversation
+        # continues. The store read is scoped to the same company, so a
+        # matching id under a different client starts empty.
         history = load_messages(session_id)
         if history:
             session.conversation_history = history
 
-    _sessions[new_id] = session
+    _sessions[(scope, new_id)] = session
     return session
 
 
@@ -123,6 +133,70 @@ def _build_page_context_block(page_context: PageContext | None) -> str:
     return "\n".join(lines)
 
 
+def may_access_session(
+    meta: dict[str, Any], caller_person_id: int | None, request: Request
+) -> bool:
+    """May this caller open (read, continue, rename, delete) this conversation?
+
+    Owned rows belong to their owner. A row with **no** recorded owner is a
+    pre-roster leftover that can hold the principal's own early history, and
+    the owner late-bind in :func:`create_session` would hand ownership — and
+    with it rename and delete rights — to whoever continues it first. So
+    unowned rows are the principal's alone, or, on an install with no
+    principal yet, a header-less caller's (the CLI / operator).
+    """
+    owner = meta.get("caller_person_id")
+    if owner is not None:
+        return owner == caller_person_id
+    from openexecutive.people.store import find_principal_person
+
+    try:
+        principal = find_principal_person()
+    except Exception:  # roster unreadable → treat as "no principal yet"
+        logger.warning("session_access: principal lookup failed", exc_info=True)
+        principal = None
+    if principal is None:
+        return not (request.headers.get("x-caller-email") or "").strip()
+    return caller_person_id == principal.id
+
+
+def forget_cached_session(session_id: str) -> None:
+    """Drop the live Session cached for ``session_id`` in the current scope.
+
+    The in-process cache holds conversation history that no longer has a
+    database row behind it — after a delete, a scope purge, or a failed
+    ``create_session``. Without this, a cache hit would serve that history to
+    whoever next presents the id, behind both the ownership gate and the
+    scope predicate (the gate lets an unknown id through so a fresh
+    conversation can start under it).
+    """
+    from openexecutive.memory.session_store import current_client_scope
+
+    _sessions.pop((current_client_scope(), session_id), None)
+
+
+def _assert_session_access(
+    session_id: str, caller_person_id: int | None, request: Request
+) -> None:
+    """404 when ``session_id`` exists (in the current scope) and is not the
+    caller's to open — see :func:`may_access_session`.
+
+    Shared by the ``/sessions`` by-id routes and the chat route, so a
+    caller-supplied ``session_id`` on ``POST /chat`` cannot pull another
+    user's history into the model context. An unknown id passes (the chat
+    route then starts a fresh conversation under that id) — but its stale
+    cache entry, if any, is dropped first.
+    """
+    from openexecutive.memory.session_store import get_session_metadata
+
+    meta = get_session_metadata(session_id)
+    if meta is None:
+        forget_cached_session(session_id)
+        return
+    if not may_access_session(meta, caller_person_id, request):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
 def _resolve_caller_person_id(request: Request) -> int | None:
     """Resolve the calling Person from the `x-caller-email` header.
 
@@ -168,12 +242,23 @@ async def _run_chat_turn(
     from openexecutive.config import get_settings
     from openexecutive.knowledge.retriever import retrieve
     from openexecutive.memory.episodic import format_for_prompt
-    from openexecutive.memory.session_store import create_session
+    from openexecutive.memory.session_store import NEW_CHAT_TITLE, create_session
     from openexecutive.orchestrator.executive import Executive
 
     t0 = time.monotonic()
     turn_id = uuid.uuid4().hex
     collector = DebugCollector(t0=t0, turn_id=turn_id)
+
+    # Resolve the caller first. Used for the ownership gate below, for
+    # Honcho's per-person memory AND for tagging the session row's owner (so
+    # /sessions can filter the sidebar by signed-in user). See
+    # `_resolve_caller_person_id` for the precedence rule that protects
+    # against cross-identity leakage.
+    caller_person_id = _resolve_caller_person_id(request)
+    if session_id:
+        # Before anything is loaded into the in-process cache or the model
+        # context: a session id is not a capability.
+        _assert_session_access(session_id, caller_person_id, request)
 
     session = _get_or_create_session(session_id, request)
     is_first_turn = len(session.conversation_history) == 0
@@ -198,19 +283,23 @@ async def _run_chat_turn(
         full={"message": message},
     )
 
-    # Resolve the caller. Used for Honcho's per-person memory AND for
-    # tagging the session row's owner (so /sessions can filter the
-    # sidebar by signed-in user). See `_resolve_caller_person_id` for
-    # the precedence rule that protects against cross-identity leakage.
-    caller_person_id = _resolve_caller_person_id(request)
-
     # Persist the session row immediately (idempotent INSERT OR IGNORE) so a
     # mid-turn failure never leaves a ghost in-memory session with no DB row.
     # `caller_person_id` is bound here on the first turn; INSERT OR IGNORE means
     # subsequent turns can't overwrite the owner.
-    title = message[:_TITLE_MAX_LEN].replace("\n", " ") if is_first_turn else session.session_id
+    # Placeholder until the Haiku title lands below; "New chat" covers a
+    # files-only first turn whose text is empty. Non-first turns never
+    # touch the title (INSERT OR IGNORE / ON CONFLICT keeps the row).
+    title = NEW_CHAT_TITLE
+    if is_first_turn:
+        title = message[:_TITLE_MAX_LEN].replace("\n", " ").strip() or NEW_CHAT_TITLE
+    # The row's title after the upsert. When it is still the placeholder we
+    # just supplied, the title is ours to replace with the generated one
+    # below; anything else means the user named this chat (POST /sessions
+    # with a title, or a rename) and we must leave it alone.
+    stored_title: str | None = None
     try:
-        create_session(
+        stored_title = create_session(
             session.session_id,
             title,
             session.created_at.isoformat(),
@@ -409,14 +498,15 @@ async def _run_chat_turn(
 
                 # First-turn rename: replace the truncated-message
                 # placeholder set by create_session() with a Haiku-generated
-                # topic title. Awaited (not fire-and-forget) so the sidebar
+                # topic title. Skipped when the stored title is not the
+                # placeholder we supplied — the user named this chat. Awaited (not fire-and-forget) so the sidebar
                 # picks up the good title on the refresh that follows the
                 # `done` event we yield below — no second roundtrip needed.
                 #
                 # Hard timeout on the title call so a slow/hung Haiku can't
                 # stall the SSE `done` event indefinitely. On timeout we
                 # leave the placeholder title in place.
-                if is_first_turn:
+                if is_first_turn and stored_title == title:
                     from openexecutive.memory.session_store import (
                         update_session_title,
                     )

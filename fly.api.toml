@@ -11,6 +11,10 @@ primary_region = "dfw"  # Dallas (mia/Miami is deprecated on Fly)
 
 [deploy]
   strategy = "immediate"
+  # Apply chat-history migrations against the attached Managed Postgres before
+  # the new machine serves traffic. Exits 0 (no-op) until DATABASE_URL exists,
+  # so this is safe to deploy before `fly mpg attach` has run.
+  release_command = "python -m openexecutive.memory.migrate"
 
 # Bind uvicorn to :: (IPv6, dual-stack — also accepts IPv4). Fly's private 6PN
 # network between apps is IPv6-only, so the UI reaches openexecutive-api.internal

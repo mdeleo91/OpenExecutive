@@ -67,6 +67,23 @@
     font-family: 'Inter', system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    /* Nothing in the app should scroll sideways; a stray wide element must
+     * clip rather than push the whole page. */
+    overflow-x: hidden;
+  }
+
+  /* Dynamic viewport height: on mobile browsers `100%` of <html> is the
+   * largest viewport (toolbars retracted), so a flex column sized from it
+   * overflows by the toolbar height and the sticky composer ends up under
+   * the browser chrome or the keyboard. `100dvh` tracks the visible area
+   * (and, with interactive-widget=resizes-content, the keyboard). The
+   * `100%` line above stays as the fallback for browsers without dvh. */
+  body {
+    height: 100dvh;
+    /* Landscape on notched phones: keep content out from under the notch.
+     * Portrait insets are 0, so this is a no-op there. */
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
   }
 
   ::-webkit-scrollbar {
@@ -88,6 +105,19 @@
 @layer utilities {
   .cursor-blink {
     animation: blink 1s step-end infinite;
+  }
+
+  /* Touch targets: `min-h-touch` / `min-w-touch` are 40px (tailwind.config)
+   * for dense pointer UIs; on touch devices raise them to the 44px
+   * platform guideline. Declared after Tailwind's own utilities in the same
+   * layer so it wins at equal specificity. */
+  @media (pointer: coarse) {
+    .min-h-touch {
+      min-height: 2.75rem;
+    }
+    .min-w-touch {
+      min-width: 2.75rem;
+    }
   }
 
   @keyframes blink {

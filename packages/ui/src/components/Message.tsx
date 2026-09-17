@@ -38,8 +38,8 @@ export default function Message({ role, content, isStreaming, actions }: Message
   if (role === "user") {
     return (
       <div className="flex justify-end mb-6">
-        <div className="max-w-xl px-4 py-3 rounded-2xl rounded-tr-sm bg-surface-overlay text-fg text-sm leading-relaxed">
-          <p className="whitespace-pre-wrap">{content}</p>
+        <div className="max-w-[85%] sm:max-w-xl px-4 py-3 rounded-2xl rounded-tr-sm bg-surface-overlay text-fg text-sm leading-relaxed min-w-0">
+          <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{content}</p>
         </div>
       </div>
     );
@@ -55,7 +55,11 @@ export default function Message({ role, content, isStreaming, actions }: Message
       {/* Content */}
       <div className="flex-1 min-w-0">
         <div className="text-xs text-fg-muted mb-2 font-medium tracking-wide uppercase">Executive</div>
-        <div className="prose prose-invert prose-sm max-w-none
+        {/* `[overflow-wrap:anywhere]` + scrollable <pre>/<table> keep long
+            URLs, code and wide tables inside a 360px viewport instead of
+            forcing the whole page to scroll sideways. */}
+        <div className="prose prose-invert prose-sm max-w-none [overflow-wrap:anywhere]
+          prose-pre:overflow-x-auto prose-pre:max-w-full
           prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-xs prose-code:bg-surface-overlay prose-code:before:content-none prose-code:after:content-none
           prose-pre:bg-surface-overlay prose-pre:border
           prose-a:text-accent prose-a:no-underline hover:prose-a:underline">
@@ -65,6 +69,15 @@ export default function Message({ role, content, isStreaming, actions }: Message
               // Block javascript: and data: URL schemes to prevent XSS via prompt injection
               if (/^(javascript|data|vbscript):/i.test(url)) return "";
               return url;
+            }}
+            components={{
+              // GFM tables have no natural wrap point; scroll them within
+              // the bubble rather than widening the page on phones.
+              table: ({ node: _node, ...props }) => (
+                <div className="overflow-x-auto max-w-full">
+                  <table {...props} />
+                </div>
+              ),
             }}
           >
             {content}

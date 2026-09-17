@@ -124,6 +124,7 @@ When your PR materially changes a documented topic, **re-author the affected `pr
 - New routing pattern (e.g., committee review) OR changed specialist routing → `routing`-adjacent sections (`agents`, `lifecycle`)
 - Schema change to a documented table → `schemas`
 - Endpoint added, removed, renamed, or response-shape changed → `api` (and any section that names it)
+- Chat-history storage change (backend, migration, scope rules) → `memory` and `schemas` (and `clients` if slot behaviour changes)
 - New top-level module under `packages/core/openexecutive/` → add a `SectionSpec` in `architecture/sections.py`, a matching entry in `packages/ui/src/app/architecture/page.tsx` (IDs must match), AND a new `prebuilt/<id>.json`
 
 Each `prebuilt/<id>.json` has the keys `section_id`, `title`, `markdown`, `mermaid` (a Mermaid string or `null`), and `generated_at`. The Markdown must not include the section heading (the UI renders the title). Validate edits with `python -m json.tool`.
@@ -186,6 +187,13 @@ See `.env.example`. Required: `ANTHROPIC_API_KEY`. Optional integrations: `SLACK
 > imports, unused `asyncio`): `make lint` only checks `openexecutive/`, so CI
 > is unaffected — lint the specific test files you touched rather than
 > `tests/` as a whole.
+
+> **Postgres chat-history tests are opt-in:** `tests/unit/test_session_store_postgres.py`
+> skips unless `TEST_DATABASE_URL` points at a scratch database (CI provides a
+> `postgres:16` service). Locally: `TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/openexecutive_test uv run pytest tests/unit/test_session_store_postgres.py`.
+> The fixture truncates `conversations`/`messages`, so never point it at real data.
+> `tests/conftest.py` pops `DATABASE_URL` so a shell value can't flip the whole
+> suite onto Postgres.
 
 > **Known-red on `main`:** `tests/integration/test_chat_committee.py::
 > test_chat_with_committee_streams_phases_and_revised_text` fails on the

@@ -330,5 +330,22 @@ async def _onboard() -> None:
     )
 
 
+@cli.command()
+@click.option(
+    "--check",
+    is_flag=True,
+    help="Report pending chat-history migrations without applying them (exit 1 if any).",
+)
+def migrate(check: bool) -> None:
+    """Apply chat-history migrations to the Postgres set in DATABASE_URL.
+
+    A no-op (exit 0) when DATABASE_URL is unset — chat history then lives in
+    the SQLite episodic database, which needs no migrations.
+    """
+    from openexecutive.memory.migrate import main as migrate_main
+
+    raise SystemExit(migrate_main(["--check"] if check else []))
+
+
 if __name__ == "__main__":
     cli()

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSession } from "next-auth/react";
 import Message from "./Message";
 import BrandMark from "./BrandMark";
@@ -53,6 +53,13 @@ const SUGGESTED_PROMPTS = [
 const FALLBACK_SUBTITLE =
   "Pick up where we left off — decisions to revisit, drafts to push forward, people to pull in.";
 
+// How close to the end of the message list (px) still counts as "at the
+// bottom" for auto-follow while a reply streams.
+const BOTTOM_FOLLOW_THRESHOLD_PX = 96;
+// Time for the mobile on-screen keyboard to finish animating in before the
+// composer is re-anchored into view.
+const KEYBOARD_SETTLE_MS = 300;
+
 export default function Chat({ onDebugEvent, initialMessages, initialSessionId, initialInput, autoSubmitInitialInput, onTurnComplete, onTurnStart }: ChatProps) {
   const { data: session } = useSession();
   const firstName = session?.user?.name?.trim().split(/\s+/)[0];
@@ -74,6 +81,11 @@ export default function Chat({ onDebugEvent, initialMessages, initialSessionId, 
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [fileError, setFileError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // Whether the list is scrolled to (near) the bottom. Auto-follow only
+  // while true, so a user reading earlier messages isn't yanked down by
+  // every streamed chunk; a "Jump to latest" button covers the rest.
+  const [atBottom, setAtBottom] = useState(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const adoptedSessionIdRef = useRef<string | undefined>(initialSessionId);
@@ -106,11 +118,37 @@ export default function Chat({ onDebugEvent, initialMessages, initialSessionId, 
     setMessages(initialMessages ?? []);
     setSessionId(initialSessionId);
     setStreamingContent("");
+    // A different conversation opens at its end, whatever the scroll state of
+    // the previous one was — Chat is not remounted between sessions, so a
+    // stale `false` here would leave the new one mid-scroll with the jump
+    // button showing.
+    setAtBottom(true);
   }, [initialSessionId]);
 
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    bottomRef.current?.scrollIntoView({ behavior, block: "end" });
+  }, []);
+
+  function handleScroll() {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setAtBottom(distance < BOTTOM_FOLLOW_THRESHOLD_PX);
+  }
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamingContent]);
+    if (atBottom) scrollToBottom();
+    // Only new content should trigger a follow, not the atBottom flip itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, streamingContent, scrollToBottom]);
+
+  // A fresh send always follows: the user just acted at the bottom.
+  useEffect(() => {
+    if (isLoading) {
+      setAtBottom(true);
+      scrollToBottom("auto");
+    }
+  }, [isLoading, scrollToBottom]);
 
   // One-shot auto-submit of the initialInput on mount when the parent
   // requests it (briefing handoffs). Guarded by a ref so prop churn can't
@@ -256,13 +294,18 @@ export default function Chat({ onDebugEvent, initialMessages, initialSessionId, 
   const isEmpty = messages.length === 0 && !isLoading && !streamingContent;
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-h-0">
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="relative flex-1 min-h-0">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="h-full overflow-y-auto overflow-x-hidden overscroll-y-contain"
+      >
         <div className="max-w-3xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
           {isEmpty ? (
             /* Empty state */
-            <div className="flex flex-col items-center justify-center min-h-[60vh] text-center">
+            <div className="flex flex-col items-center justify-center min-h-[50dvh] text-center">
               <div className="mb-6">
                 <BrandMark size="lg" />
               </div>
@@ -352,9 +395,26 @@ export default function Chat({ onDebugEvent, initialMessages, initialSessionId, 
           <div ref={bottomRef} />
         </div>
       </div>
+      {!atBottom && !isEmpty && (
+        <button
+          type="button"
+          onClick={() => {
+            setAtBottom(true);
+            scrollToBottom();
+          }}
+          aria-label="Jump to latest message"
+          className="absolute bottom-3 left-1/2 -translate-x-1/2 min-h-touch inline-flex items-center gap-1.5 px-3.5 rounded-full bg-surface-overlay border border-line-strong text-fg text-xs font-medium shadow-lg cursor-pointer hover:bg-surface-hover transition-colors"
+        >
+          <Icon name="arrow-down" size="w-3.5 h-3.5" />
+          Jump to latest
+        </button>
+      )}
+      </div>
 
-      {/* Input */}
-      <div className="border-t border-line bg-surface px-4 sm:px-6 py-3 sm:py-4">
+      {/* Input — in-flow (not fixed) so the dvh-sized column keeps it above
+          the on-screen keyboard; safe-area padding for the md+ layout where
+          it is the bottom-most element (below md the bottom nav pads). */}
+      <div className="border-t border-line bg-surface px-4 sm:px-6 py-3 sm:py-4 md:pb-[max(1rem,env(safe-area-inset-bottom))] flex-shrink-0">
         <div className="max-w-3xl mx-auto">
           {pendingFiles.length > 0 && (
             <div className="flex flex-wrap gap-2 mb-2" aria-label="Pending attachments">
@@ -416,7 +476,19 @@ export default function Chat({ onDebugEvent, initialMessages, initialSessionId, 
               rows={1}
               disabled={isLoading}
               aria-label="Message"
-              className="flex-1 bg-transparent text-fg placeholder:text-fg-muted text-sm sm:text-base leading-relaxed resize-none focus:outline-none disabled:opacity-50 max-h-40 overflow-y-auto"
+              onFocus={() => {
+                // iOS scrolls the focused field into view, but the flex
+                // column above it may still be mid-layout when the keyboard
+                // animates in; re-anchor once it has settled.
+                setTimeout(
+                  () => textareaRef.current?.scrollIntoView({ block: "nearest" }),
+                  KEYBOARD_SETTLE_MS,
+                );
+              }}
+              // text-base (16px) everywhere: iOS Safari zooms the page on
+              // focusing any input smaller than 16px, which is the classic
+              // "chat box jumps" bug.
+              className="flex-1 min-w-0 bg-transparent text-fg placeholder:text-fg-muted text-base leading-relaxed resize-none focus:outline-none disabled:opacity-50 max-h-40 overflow-y-auto"
               style={{ minHeight: "24px" }}
             />
             <button
@@ -426,7 +498,7 @@ export default function Chat({ onDebugEvent, initialMessages, initialSessionId, 
               title="Committee review: slower, higher-quality response — adversarial review pass before sending"
               aria-pressed={committeeEnabled}
               className={
-                "flex-shrink-0 min-h-touch px-3 rounded-xl text-xs font-medium transition-all duration-150 border cursor-pointer " +
+                "flex-shrink-0 min-h-touch px-2.5 sm:px-3 rounded-xl text-xs font-medium transition-all duration-150 border cursor-pointer " +
                 (committeeEnabled
                   ? "bg-indigo-500/15 border-indigo-500/60 text-indigo-300 hover:bg-indigo-500/20"
                   : "bg-surface-overlay border-line-strong text-fg-muted hover:text-fg hover:border-line-strong") +

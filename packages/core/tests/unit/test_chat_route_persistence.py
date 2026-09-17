@@ -113,6 +113,37 @@ def test_get_or_create_session_idempotent(temp_db: Path, patched_deps: None) -> 
     assert s1.session_id == "abc-123"
 
 
+def test_session_cache_is_keyed_by_client_scope(
+    temp_db: Path, patched_deps: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Switching client slot must not hand back the previous company's live
+    Session from the in-process cache — channel thread ids (and web ids) are
+    identical across slots, so the cache key includes the scope."""
+    from openexecutive.memory import session_store
+
+    class _Req:
+        class _App:
+            class _State:
+                pass
+            state = _State()
+
+        app = _App()
+
+    req: Any = _Req()
+    monkeypatch.setattr(session_store, "current_client_scope", lambda: None)
+    first = chat_route._get_or_create_session("telegram:42", req)
+    first.conversation_history = [{"role": "user", "content": "acme secret"}]
+
+    monkeypatch.setattr(session_store, "current_client_scope", lambda: "globex")
+    second = chat_route._get_or_create_session("telegram:42", req)
+    assert second is not first
+    assert second.conversation_history == []
+
+    # Back in the original scope the live session is still there.
+    monkeypatch.setattr(session_store, "current_client_scope", lambda: None)
+    assert chat_route._get_or_create_session("telegram:42", req) is first
+
+
 def test_chat_endpoint_persists_session_before_streaming(
     temp_db: Path, patched_deps: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

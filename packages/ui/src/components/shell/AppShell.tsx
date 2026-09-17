@@ -97,7 +97,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         {/* Mobile backdrop */}
         {drawerOpen && (
           <div
-            className="fixed top-8 bottom-0 left-0 right-0 bg-black/50 z-30 lg:hidden"
+            className="fixed inset-0 bg-black/50 z-30 lg:hidden"
             onClick={() => setDrawerOpen(false)}
             aria-hidden="true"
           />
@@ -145,8 +145,9 @@ function Rail({
   return (
     <aside
       className={`
-        fixed top-8 bottom-0 left-0 z-40 w-64 lg:w-56 lg:top-0 flex-shrink-0
+        fixed inset-y-0 left-0 z-40 w-[min(18rem,85vw)] lg:w-56 flex-shrink-0
         border-r border-line flex flex-col bg-surface-elevated
+        pb-[env(safe-area-inset-bottom)] lg:pb-0
         transform transition-transform duration-200
         lg:relative lg:translate-x-0 lg:transition-none
         ${drawerOpen ? "translate-x-0" : "-translate-x-full"}
@@ -406,7 +407,9 @@ export function MobileBottomNav({
   return (
     <nav
       aria-label="Primary"
-      className={`${hideClass} h-16 border-t border-line bg-surface-elevated flex items-stretch flex-shrink-0`}
+      // Safe-area padding keeps the bar above the home indicator on notched
+      // phones (the root viewport uses viewport-fit=cover).
+      className={`${hideClass} h-[calc(4rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)] border-t border-line bg-surface-elevated flex items-stretch flex-shrink-0`}
     >
       {MOBILE_PRIMARY.map((item) => {
         const active = isActive(item.href, pathname);

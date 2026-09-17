@@ -818,6 +818,15 @@ async def create_client_slot(
         if slot.exists():
             raise ClientSlotConflictError(f"Client {slug!r} already exists")
 
+        # A new client starts with no chat history, even when its slug was
+        # used before: Postgres-backed conversations are keyed by slug and do
+        # not travel with the slot directory, so anything left under this one
+        # (a delete that could not reach the database) would otherwise show up
+        # as the new client's history.
+        from openexecutive.memory.session_store import purge_scope
+
+        purge_scope(slug)
+
         if source == "current" and get_active_client(settings) is not None:
             raise ClientSlotConflictError(
                 "A client is already active — its live state belongs to that "
@@ -995,5 +1004,14 @@ async def delete_client_slot(settings: Any, slug: str) -> dict[str, Any]:
                 "This client is currently active — activate another client "
                 "(or restore your company via POST /fixtures/unload) before deleting."
             )
+        # Postgres-backed chat history is scoped by slug rather than living in
+        # the slot's state.db, so drop this client's conversations explicitly.
+        # BEFORE the rmtree: purge_scope never raises, so a Postgres outage
+        # here would otherwise delete the slot and silently leave its
+        # conversations behind, where a later slot with the same slug
+        # (derive_client_slug is deterministic) would inherit them.
+        from openexecutive.memory.session_store import purge_scope
+
+        purge_scope(slug)
         shutil.rmtree(slot)
         return {"deleted": True, "slug": slug}
